@@ -3,7 +3,7 @@ package com.spark
 import com.Constants.Constan
 import java.lang
 
-import com.SparkUtils.{JedisApp, JedisConnectionPool, JedisOffset}
+import com.SparkUtils.{JedisConnectionPool, JedisOffset, Utils_time}
 import com.alibaba.fastjson.{JSON, JSONObject}
 import org.apache.kafka.clients.consumer.ConsumerRecord
 import org.apache.kafka.common.TopicPartition
@@ -21,7 +21,7 @@ object KafkaRedisOffset {
         .set("spark.streaming.kafka.maxRatePerPartition","100")
         // 设置序列化机制
         .set("spark.serializer","org.apache.spark.serializer.KryoSerializer")
-    val ssc = new StreamingContext(conf,Seconds(60))
+    val ssc = new StreamingContext(conf,Seconds(6))
     // 配置参数
     // 配置基本参数
     // 组名 topic
@@ -63,29 +63,53 @@ object KafkaRedisOffset {
         ConsumerStrategies.Assign[String,String](fromOffset.keys,kafkas,fromOffset))
     }
 
-    val value = ssc.sparkContext.textFile("E:\\大数据学习资料\\cdh\\项目（二）01\\充值平台实时统计分析\\cmcc.json")
+    /**
+      * 获取项目的城市文件，定义成广播变量
+      */
+    val citys = ssc.sparkContext.textFile("E:\\大数据学习资料\\cdh\\项目（二）01\\充值平台实时统计分析\\city.txt")
+      // 切割取值 RDD[(String, String)]
       .map(t=>(t.split(" ")(0),t.split(" ")(1)))
-    val broadcasts = ssc.sparkContext.broadcast(value.collect().toMap)
+    val broadcasts = ssc.sparkContext.broadcast(citys.collect().toMap)
 
     stream.foreachRDD(rdd =>{
       val offestRange = rdd.asInstanceOf[HasOffsetRanges].offsetRanges
         // 业务处理
-        val baseData = rdd.map(_.value()).map(t=>JSON.parseObject(t))
+        val baseData= rdd.map(_.value()).map(t=>JSON.parseObject(t))
           // 过滤需要的数据（充值通知）
           .filter(_.getString("serviceName").equalsIgnoreCase("reChargeNotifyReq"))
           .map(t=>{
-            // 先判断一下充值结果是否成功
+            // 先判断一下充值结果是否成功，
+            // 不成功时，就不需要统计
             val result = t.getString("bussinessRst") // 充值结果
             val money:Double = if(result.equals("0000")) t.getDouble("chargefee") else 0.0 // 充值金额
             val feecount = if(result.equals("0000"))  1 else 0 // 充值成功数
             val starttime = t.getString("requestId") // 开始充值时间
             val stoptime = t.getString("receiveNotifyTime") // 结束充值时间
-            (starttime.substring(0,8),List[Double](1,money,feecount))
-          }).reduceByKey((list1,list2)=>{
-          list1.zip(list2).map(t=>t._1+t._2)
-    })
-      // 处理第一个指标
-      JedisApp.Result(baseData)
+            val counttime = Utils_time.counttime(starttime,stoptime) //充值使用的时间（开始时间-结束时间）
+            (starttime.substring(0,8), //每天
+              starttime.substring(0,10), // 每小时
+              starttime.substring(0,12), // 每分钟
+              List[Double](1,money,feecount,counttime)) //充值的订单数，金额，成功数，充值时长
+          })
+
+      /**
+        * 1)统计全网的充值订单量, 充值金额, 充值成功数
+        */
+        // 按照每天作为key
+      val result1: RDD[(String, List[Double])] = baseData.map(t=>(t._1,t._4)).reduceByKey((list1, list2) => {
+        list1.zip(list2).map(t => t._1 + t._2)
+      })
+      JedisApp.Result01(result1)
+
+      /**
+        * 2)实时充值业务办理趋势, 主要统计全网每分钟的订单量数据
+        */
+        // 获取baseData中的每分钟的值作为key，和订单数（List中的第一个数）
+      val result2: RDD[(String, Double)] = baseData.map(t=>(t._3,t._4.head)).reduceByKey(_+_)
+//      JedisApp.Result02(result2)
+
+
+
       // 将偏移量进行更新
       val jedis = JedisConnectionPool.getConection()
         for (or<-offestRange){
