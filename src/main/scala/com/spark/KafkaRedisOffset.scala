@@ -86,10 +86,17 @@ object KafkaRedisOffset {
             val starttime = t.getString("requestId") // 开始充值时间
             val stoptime = t.getString("receiveNotifyTime") // 结束充值时间
             val counttime = Utils_time.counttime(starttime,stoptime) //充值使用的时间（开始时间-结束时间）
+            val pro = t.getString("provinceCode") // 获取省份的编码
+            val province = broadcasts.value.get(pro).get // 通过省份编码得到广播变量中的值
+
+
             (starttime.substring(0,8), //每天
               starttime.substring(0,10), // 每小时
               starttime.substring(0,12), // 每分钟
-              List[Double](1,money,feecount,counttime)) //充值的订单数，金额，成功数，充值时长
+              List[Double](1,money,feecount,counttime), //充值总的订单数，金额，成功数，充值时长
+            (starttime.substring(0,10),province), // 每小时，省份
+              province
+            )
           })
 
       /**
@@ -99,7 +106,7 @@ object KafkaRedisOffset {
       val result1: RDD[(String, List[Double])] = baseData.map(t=>(t._1,t._4)).reduceByKey((list1, list2) => {
         list1.zip(list2).map(t => t._1 + t._2)
       })
-      JedisApp.Result01(result1)
+//      JedisApp.Result01(result1)
 
       /**
         * 2)实时充值业务办理趋势, 主要统计全网每分钟的订单量数据
@@ -108,6 +115,34 @@ object KafkaRedisOffset {
       val result2: RDD[(String, Double)] = baseData.map(t=>(t._3,t._4.head)).reduceByKey(_+_)
 //      JedisApp.Result02(result2)
 
+      /**
+        * 2.1.全国各省充值业务失败量分布
+        * 统计每小时各个省份的充值失败数据量
+        */
+      val result3: RDD[((String, String), List[Double])] = baseData.map(t=>(t._5,t._4)).reduceByKey((list1, list2) => {
+        list1.zip(list2).map(t=>t._1+t._2)
+      })
+//      JedisApp.Result03(result3)
+
+      /**
+        * 3.充值订单省份 TOP10（存入MySQL）
+        * 以省份为维度统计订单量排名前 10 的省份数据,并且统计每个省份的订单成功率，
+        * 只保留一位小数，存入MySQL中，进行前台页面显示。
+        */
+        val result4= baseData.map(t=>(t._6,t._4)).reduceByKey((list1, list2)=>{
+          list1.zip(list2).map(t=>t._1+t._2)
+        })
+      //.map(t=>(t._1,(t._2(2)/t._2(0)).formatted("%.2f").toDouble)).sortByKey().take(10)
+//      JedisApp.Result04(result4)
+
+      /**
+        * 4.实时充值情况分布（存入MySQL）
+        * 实时统计每小时的充值笔数和充值金额。
+        */
+        val result5: RDD[(String, List[Double])] = baseData.map(t=>(t._2,t._4)).reduceByKey((list1, list2)=>{
+        list1.zip(list2).map(t=>t._1+t._2)
+      })
+      JedisApp.Result05(result5)
 
 
       // 将偏移量进行更新
